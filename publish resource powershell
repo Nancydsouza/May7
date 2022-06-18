@@ -1,0 +1,207 @@
+# -path (required) The path to the directory/file you want to create/update in Powerapps. 
+#  If you specifiy a directory it will recursively look for ALL webresource files within.
+
+# -solution (optional) by default, the script will look for and add the webresource(s) to a solution 
+#  with the same name as your current git branch. If it doesn't exist, it will take you through the steps to automatically 
+#  create the solution for you. (asking for a publisher and what not). If you want to directly add to a different solution, you can provide it here.
+
+# -ignoreBranch (optional) By default, the script will only create/edit webresources that are created/modified  
+#  in your current git branch (different from the HEAD). this doesn't always work correctly, so providing this 
+#  flag will override this feature, and always create/publish exactly what is specified in your -path. 
+#  ( I generally try it without this flag first, but if it says "no webresources found" then I will add this flag.
+
+# -changeEnv (optional) The first time you run the script in a PS session, you log in and select an environment (usually dev).
+#  Subsequent runs of the script in the same session will 'remember' the environment you chose so you don't have to select every time.  
+#  use this flag to force a prompt so you can choose a new environment to publish to.
+
+param(
+    [string]$path,
+    [string]$solution,
+    [switch]$ignoreBranch,
+    [switch]$changeEnv
+)
+
+function main {
+    param(
+        [string]$path,
+        [string]$solution,
+        [switch]$ignoreBranch,
+        [switch]$changeEnv
+    )
+    #establish repository root
+    $gitroot = Convert-Path (git rev-parse --show-toplevel)
+
+    if (!$path) {
+        #Default webresource location
+        $path = (Get-ChildItem $gitroot -Recurse -Filter WebResources) | Where-Object { !$_.FullName.Contains("solutions") } | % { $_.FullName }
+        if ($path.Count -eq 0) {
+            Write-Host "Unable to locate WebResources Directory"
+            return
+        }
+        else {
+            Write-Host $path
+        }
+    }
+
+    $ErrorActionPreference = "Stop"
+
+    if (-not (Get-Module -ListAvailable -Name "Microsoft.Xrm.Data.Powershell")) {
+        Write-Host "Xrm Data Powershell module not installed. Installing..."
+        Install-Module "Microsoft.Xrm.Data.Powershell" -AllowClobber -Repository PSGallery -Force
+    }
+    Import-Module "Microsoft.Xrm.Data.Powershell" -Verbose:$false  -WarningAction SilentlyContinue
+
+    $VerbosePreference = "SilentlyContinue"
+    
+
+    #List Valid WebResource File Extensions
+    $resourceExtensions = @(".htm", ".html", "css", "js", "json", "xml", "png", "jpg", "jpeg", "gif", "xap", "xsl", "ico", "svg")
+    
+    #Retrieve List of WebResources in path (could be a single file or a directory)
+    $fileList = Get-ChildItem -Recurse $path -Include ($resourceExtensions | ForEach-Object { "*$_" }) | Where-Object { $_.FullName.Contains("WebResources") }
+
+    if ($fileList.Count -eq 0) { 
+        Write-Host ("No webresources found to publish.") -ForegroundColor Yellow
+        return
+    }
+
+    # Only process changes associated with this feature
+    # First look at untracked changes
+    # Then look for changes associated with this branch
+    $changes = ((git diff-tree --no-commit-id --name-only -r HEAD) + (git ls-files --others --exclude-standard --full-name) + (git diff --name-only))
+
+    #$featureFiles = ((git diff-tree --no-commit-id --name-only -r HEAD) + (git ls-files --others --exclude-standard --full-name) + (git diff --name-only)) | % { $gitroot + "\" + $_.Replace("/", "\") } 
+    
+    
+    if ($ignoreBranch -eq $true) {
+        #Write-Host ("ignorebranch set") -ForegroundColor Yellow
+        $converted = $fileList | ForEach-Object { New-Object psobject -Property @{ 
+                file        = $_.FullName
+                fileContent = [System.Convert]::ToBase64String([System.IO.File]::ReadAllBytes($_.FullName))
+                name        = $_.FullName.SubString($_.FullName.IndexOf("WebResources") + "WebResources".Length + 1).Replace("\", "/") 
+                type        = Get-FileTypeFromExtension $_.Extension
+            }
+        }
+    }
+    else {
+        #Write-Host ("ignorebranch NOT set.") -ForegroundColor Yellow
+        if ($changes -ne $null) {
+            $featureFiles = $changes | % { $gitroot + "\" + $_.Replace("/", "\") }
+            $converted = $fileList | Where-Object { $featureFiles -contains $_.FullName } | ForEach-Object { New-Object psobject -Property @{ 
+                    file        = $_.FullName
+                    fileContent = [System.Convert]::ToBase64String([System.IO.File]::ReadAllBytes($_.FullName))
+                    name        = $_.FullName.SubString($_.FullName.IndexOf("WebResources") + "WebResources".Length + 1).Replace("\", "/") 
+                    type        = Get-FileTypeFromExtension $_.Extension
+                }
+            }
+        }
+    }
+
+    if ($converted.Count -eq 0) {
+        Write-Host ("No Webresource Changes to Process in current branch (use -ignorebranch to process all files)") -ForegroundColor Yellow
+        return
+    }
+
+    $converted | Foreach-object {
+        Write-Host ("  [" + $_.name + "]...") }
+
+    if ($changeEnv) {
+        $global:publishenv = $null;
+    }
+    while (!$global:publishenv) {
+        $global:publishenv = [Microsoft.Xrm.Tooling.Connector.CrmServiceClient](&($PSScriptRoot + "\Connect.ps1"))
+    }
+
+    $solution = &($PSScriptRoot + "\Resolve-SolutionFromBranch.ps1") -solution $solution -conn $global:publishenv
+
+    if (!$solution) {
+        Write-Host "No Active Solution." -ForegroundColor Red
+        return
+    }
+
+    
+
+    #while (!$xrmconnection) {
+    #    &($PSScriptRoot + "\XrmConnect.ps1")
+    #}
+
+    Write-Host ("Connected to ") -NoNewline
+    Write-Host  ( $global:publishenv.ConnectedOrgFriendlyName + " [" +  $global:publishenv.ConnectedOrgUniqueName + "] as '" +  $global:publishenv.OauthUserId + "'." ) -ForegroundColor Yellow
+    Write-Host ("Using Solution ") -NoNewline -ForegroundColor Cyan
+    Write-Host ($solution) -ForegroundColor Yellow
+
+    #Capture items to publish (created resources don't need to be published, only updated ones.)
+    $toPublish = [System.Collections.ArrayList]@()
+    #For Each Resource, Determine if resource exists,  
+    $converted | Foreach-object {
+        Write-Host ("  [" + $_.name + "]...") -NoNewline -ForegroundColor Magenta
+        $res = Get-CrmRecords -conn  $global:publishenv webresource name eq $_.name -Fields * -WarningAction SilentlyContinue
+        $resourceid = "";
+        if ($res.Count -eq 0) {
+            Write-Host ("Not Found. Creating...") -NoNewline 
+            #create our webresource
+            $fields = @{
+                "name"            = $_.name
+                "displayname"     = $_.name
+                "content"         = $_.fileContent
+                "webresourcetype" = New-CrmOptionSetValue -Value $_.type
+            }
+            $resourceid = New-CrmRecord -conn  $global:publishenv -EntityLogicalName webresource -Fields $fields 
+            Write-Host ("Done. ") -NoNewline
+        }
+        else {
+            Write-Host "Located. Updating..." -NoNewline
+            #just update content...
+            Set-CrmRecord -conn $global:publishenv webresource $res.CrmRecords[0].webresourceid @{ "content" = $_.fileContent }
+            $resourceid = $res.CrmRecords[0].webresourceid
+            $toPublish.Add($resourceid) > $null
+            Write-Host ("Done. ") -NoNewline
+        }
+        #Finally add to our current solution...
+        #Write-Host ("Adding to Solution [" + $solution + "]...") -NoNewline
+        $comp = Invoke-CrmAction -conn  $global:publishenv -Name AddSolutionComponent -Parameters @{
+            "ComponentType"         = 61 #WebResource
+            "ComponentId"           = $resourceid
+            "SolutionUniqueName"    = $solution
+            "AddRequiredComponents" = $false
+        }
+        Write-Host ("Complete.") -ForegroundColor Green
+    }
+
+    
+    #finally Publish all changes.
+    if ($toPublish.Count -ne 0) {
+        Write-Host ("Publishing Changes...") -NoNewline -ForegroundColor Cyan
+
+        $publishXml = "<importexportxml><webresources>"
+        $toPublish | % { $publishXml += ("<webresource>" + $_ + "</webresource>") }
+        $publishXml += "</webresources></importexportxml>"
+
+        Invoke-CrmAction -conn $global:publishenv -Name PublishXml -Parameters @{
+            "ParameterXml" = $publishXml
+        }
+        Write-Host ("Complete.") -ForegroundColor Green
+    }
+
+    
+}
+
+function Get-FileTypeFromExtension {
+    Param([string]$extension)
+    switch ($extension.TrimStart(".")) {
+        { "htm", "html" -contains $_ } { return 1 }
+        { "css" -contains $_ } { return 2 } 
+        { "js", "json" -contains $_ } { return 3 } 
+        { "xml" -contains $_ } { return 4 }
+        { "png" -contains $_ } { return 5 }
+        { "jpg", "jpeg" -contains $_ } { return 6 }
+        { "gif" -contains $_ } { return 7 }
+        { "xap" -contains $_ } { return 8 }
+        { "xsl" -contains $_ } { return 9 }
+        { "ico" -contains $_ } { return 10 }
+        { "svg" -contains $_ } { return 11 }
+        default { return $null }  
+    }
+}
+
+main -path $path -solution $solution -ignoreBranch: $ignoreBranch -changeEnv: $changeEnv
