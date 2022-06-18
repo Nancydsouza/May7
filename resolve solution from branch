@@ -1,0 +1,136 @@
+param([string]$solution,
+      [Microsoft.Xrm.Tooling.Connector.CrmServiceClient]$conn
+)
+
+function main {
+    param(
+        [string]$solution,
+        [Microsoft.Xrm.Tooling.Connector.CrmServiceClient]$conn
+    )
+
+    #Branch names to exclude...
+    $exclude = @("develop", "main", "HEAD")
+
+    #Determine if branch is other than main or develop
+    if (!$solution) {
+        $branch = git rev-parse --abbrev-ref HEAD
+        Write-Host ("Current Branch: [" + $branch + "]") -ForegroundColor Cyan
+        # exit if not a dev branch
+        if ($exclude -contains $branch) {
+            Write-Host ("Solutions can only be created from a Feature Branch.") -ForegroundColor Red
+            return $null
+        }
+    } else {
+        $branch = $solution
+    }
+    #Ensure Connection Established
+    
+    if (-not (Get-Module -ListAvailable -Name "Microsoft.Xrm.Data.Powershell")) {
+        Write-Host "Xrm Data Powershell module not installed. Installing..."
+        Install-Module "Microsoft.Xrm.Data.Powershell" -AllowClobber -Repository PSGallery -Force
+    }
+     
+    Import-Module "Microsoft.Xrm.Data.Powershell"
+
+    # Start with all Visible,Unmanaged Solutions
+    $query = '<fetch>
+                <entity name="solution">
+                  <all-attributes />
+                  <filter type="and">
+                    <condition attribute="uniquename" operator="eq" value="{0}" />
+                    <condition attribute="isvisible" operator="eq" value="1" />
+                    <condition attribute="ismanaged" operator="eq" value="0" />
+                  </filter>
+                </entity>
+              </fetch>' -f $branch
+
+
+    $result = Get-CrmRecordsByFetch -conn $conn -Fetch $query -WarningAction SilentlyContinue
+
+    if ($result.Count -eq 0) {
+        if (!$solution) {
+            Write-Host ("No Solution Found for branch '" + $branch + "'. Creating...")
+            #Prompt for Publisher
+            $publisher = Get-CrmPublisher -conn $conn
+            if (!$publisher) {
+                Write-Host "No Publisher Selected, Unable to create solution from branch." -ForegroundColor Red
+                return $null
+            }
+
+            $confirmed = $false
+            while (!$confirmed) {
+                Write-Host ("Confirm create of Solution '{0}' with publisher '{1}'" -f $branch, $publisher.Name) -ForegroundColor Yellow
+                $resp = Read-Host "[Y]es or [N]o: "
+                if ($resp -eq 'n') {
+                    return $null
+                }
+                $confirmed = ($resp -eq 'y')
+            }
+
+            #Create Solution with Branch Name
+            $record = New-CrmRecord -conn $conn -EntityLogicalName solution -Fields @{
+                "uniquename"   = $branch
+                "friendlyname" = $branch
+                "publisherid"  = $publisher
+                "version"      = "0.0.0.1"
+            }
+            return $branch
+        } else {
+            Write-Host("Solution '{0}' Not Found." -f $solution )
+            return $null
+        }
+    }
+    else {
+        return $result.CrmRecords[0].uniquename
+    }
+
+}
+
+Function Get-CrmPublisher {
+    param(
+        [Microsoft.Xrm.Tooling.Connector.CrmServiceClient]$conn
+    )
+    # get all editable, non-microsoft publishers
+    $query = '<fetch>
+                <entity name="publisher">
+                  <all-attributes />
+                  <filter type="and">
+                    <condition attribute="isreadonly" operator="eq" value="0" />
+                    <condition attribute="uniquename" operator="not-like" value="%microsoft%" />
+                  </filter>
+                </entity>
+              </fetch>'
+
+
+    $result = Get-CrmRecordsByFetch -conn $conn -Fetch $query -WarningAction SilentlyContinue
+
+    $response = 0
+    $valid = $false
+    while (!$valid) {
+        $opt = 0
+
+        Write-Host "Select a publisher" -ForegroundColor DarkYellow
+        Write-Host "[0]: Cancel"
+
+        $result.CrmRecords | ForEach-Object {
+            $opt += 1
+            Write-Host("[{0}]: {1} ({2})" -f $opt, $_.uniquename, $_.customizationprefix)
+        }
+
+        if ([Int]::TryParse((Read-Host), [ref]$response)) {
+            if ($response -eq 0) {
+                return $null
+            }
+            elseif ($response -le $opt) {
+                $valid = $true
+            }
+        }
+
+    }
+    Write-Host ("You Selected - " + $response)
+    $pub = new-CrmEntityReference -EntityLogicalName publisher -Id $result.CrmRecords[$response - 1].publisherid.Guid
+    $pub.Name = $result.CrmRecords[$response - 1].uniquename
+    return $pub
+}
+
+main $solution -conn $conn
