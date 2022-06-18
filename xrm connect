@@ -1,0 +1,24 @@
+function main {
+   
+    $ErrorActionPreference = "Stop"
+
+    if (-not (Get-Module -ListAvailable -Name "Microsoft.Xrm.Tooling.CrmConnector.Powershell")) {
+        Write-Host "CRM Connector Powershell module not installed. Installing..."
+        Install-Module "Microsoft.Xrm.Tooling.CrmConnector.Powershell" -Repository PSGallery -Force
+    }
+
+    Import-Module "Microsoft.Xrm.Tooling.CrmConnector.Powershell" -Verbose:$false -WarningAction SilentlyContinue
+
+    $VerbosePreference = "SilentlyContinue"
+    $global:xrmconnection = $null
+    $global:xrmconnection = Get-CrmConnection -InteractiveMode -MaxCrmConnectionTimeOutMinutes 120 -WarningAction SilentlyContinue -Verbose:$true
+    #write-host "Trying to set timeout to: " $connectionTimeoutSeconds
+    Set-CrmConnectionTimeout -conn $global:xrmconnection -TimeoutInSeconds $connectionTimeoutSeconds -WarningAction SilentlyContinue
+    
+    #Test To Ensure We are connected.
+    $user = Invoke-CrmWhoAmI -conn $global:xrmconnection -WarningAction SilentlyContinue
+    
+    
+}
+
+main 
