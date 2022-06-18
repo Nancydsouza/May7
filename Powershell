@@ -1,0 +1,92 @@
+param(
+    [string]$org,
+    [switch]$showAll,
+    [switch]$resetConnection
+)
+
+function main {
+    param(
+        [string]$org,
+        [switch]$showAll,
+        [switch]$resetConnection
+    )
+
+    $knownOrgs = @('pacts360-newdev01', 'pacts360-core-int', 'pacts360-dev-test', 'pacts360-dev-stg', 'pacts360-qa', 'pacts360-training')
+    
+    $ErrorActionPreference = "Stop"
+
+    if (-not (Get-Module -ListAvailable -Name "Microsoft.Xrm.Tooling.CrmConnector.Powershell")) {
+        Write-Host "CRM Connector Powershell module not installed. Installing..."
+        Install-Module "Microsoft.Xrm.Tooling.CrmConnector.Powershell" -Repository PSGallery -Force
+    }
+
+    Import-Module "Microsoft.Xrm.Tooling.CrmConnector.Powershell" -Verbose:$false -WarningAction SilentlyContinue
+
+    $VerbosePreference = "SilentlyContinue"
+
+    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+
+    $username = "{0}@pps-dev.uscourts.gov" -f $env:UserName
+    if ($global:xrmcredential -eq $null -or $resetConnection) {
+      $global:xrmcredential = Get-Credential -UserName $username -Message "Enter Password" -Verbose
+    }
+
+    # Get Org Names
+    if ($global:CrmOrgList -eq $null -or $resetConnection) {
+        $orgs = Get-CrmOrganizations -OnlineType Office365 -DeploymentRegion USG -Credential $global:xrmcredential
+
+        $global:CrmOrgList = $orgs | ForEach-Object { 
+            $index = $knownOrgs.IndexOf($_.UrlHostName)
+            if($index -eq -1) {
+                $index = 99
+            }
+            #Write-Host("{0} - {1}" -f $_.UrlHostName, $index)
+            New-Object psobject -Property @{
+                Name = $_.FriendlyName
+                UniqueName = $_.UniqueName
+                HostName = $_.UrlHostName
+                Index = $index
+            }
+        } | Sort-Object -Property Index
+    }
+
+    $response = 0
+    $valid = $false
+
+
+    while (!$valid) {
+        $opt = 0
+
+        Write-Host "** Available Organizations **" -ForegroundColor Blue
+        Write-Host "[0]: Cancel"
+
+        $global:CrmOrgList | where { ($knownOrgs -contains $_.HostName) -or $showAll } | ForEach-Object {
+            $opt += 1
+            Write-Host("[{0}]: {1} ({2})" -f $opt, $_.Name, $_.HostName)
+        }
+
+        Write-Host "Select an Organization: " -ForegroundColor Blue -NoNewLine
+
+        if ([Int]::TryParse((Read-Host), [ref]$response)) {
+            if ($response -eq 0) {
+                return $null
+            }
+            elseif ($response -le $opt) {
+                $valid = $true
+            }
+        }
+
+    }
+    
+    #clear
+
+    $conn = $null
+    $conn = Get-CrmConnection -OrganizationName $global:CrmOrgList[$response-1].UniqueName -OnlineType Office365 -DeploymentRegion USG -Credential $global:xrmcredential
+    #output connection
+    $conn
+    
+
+}
+
+
+main -org $org -resetConnection:$resetConnection -showAll:$showAll
